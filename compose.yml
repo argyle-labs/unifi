@@ -1,9 +1,0 @@
-services:
-  unifi:
-    image: ghcr.io/scottdkey/unifi:latest
-    container_name: unifi
-    restart: unless-stopped
-    ports:
-      - "8443:8443"
-    volumes:
-      - /opt/unifi/config:/config
