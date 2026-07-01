@@ -1,25 +1,31 @@
+<p align="center">
+  <img src="assets/icon-256.png" width="120" alt="unifi" />
+</p>
+
 # unifi
 
-UniFi network controller — a first-party [orca](https://github.com/argyle-labs/orca) **service-backend**
-plugin. It registers a `ServiceBackend` and exposes **no tools of its own**: orca
-drives every plugin through the single generic `service.*` surface — `list`,
-`deploy`, `backup`, `restore`, `configure`, `status`. Rich, unifi-specific data is
-surfaced through the **typed `service.status` payload**, never bespoke tools (one
-small API for the whole fleet).
+The UniFi Network controller manages Ubiquiti UniFi access points, switches, and gateways.
 
-**Runtimes:** docker,podman,lxc,vm.
+A first-party [orca](https://github.com/argyle-labs/orca) plugin (appliance integration).
 
-**Design — pure Rust, zero bash.** No `compose.yml`, `Dockerfile`, or provision
-scripts. Deployment is rendered by orca's `deploy_target` from the backend's
-`WorkloadSpec`; backup/restore run through the pluggable `BackupMethod` (tar for
-containers/LXC, **Proxmox Backup Server** for Proxmox guests when available);
-`configure`/`status` call the upstream API. The only per-plugin code is the
-declarative descriptor plus `workload_spec`/`configure`/`status`.
+This plugin **connects orca to an existing unifi install** — there's nothing to deploy here. Stand up unifi from the upstream project, then point orca at it.
 
-See [CAPABILITIES.md](CAPABILITIES.md) for the contract checklist.
+---
 
-## Manual setup & management
+## Run it without orca
 
-The plugin automates unifi, but this repo is self-contained: the docs below (migrated + anonymized from a homelab runbook) let you deploy, configure, and operate it **entirely by hand** on any supported runtime.
+Install unifi per the upstream project: <https://ui.com/>. It listens on port `8443` by default; this plugin talks to that endpoint (host, credentials/token) — no container is deployed.
 
-- [unifi-setup](docs/unifi-setup.md)
+
+See [unifi-setup.md](docs/unifi-setup.md) for worked operator notes.
+
+## With orca
+
+orca drives this plugin through its generic surface — rich, unifi-specific data comes back in the typed `service.status` payload, never bespoke tools.
+
+## Layout
+
+- `src/` — the plugin (pure Rust): the `ServiceBackend` descriptor + `configure` / `status`.
+- `docs/` — standalone operator notes.
+- [CAPABILITIES.md](CAPABILITIES.md) — the service-backend contract checklist.
+- `assets/` — plugin icon.
