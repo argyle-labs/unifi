@@ -1,0 +1,31 @@
+# Proxmox LXC config for UniFi Network Application — /etc/pve/lxc/<vmid>.conf
+#
+# Service: UniFi Network Application (controller for UniFi APs/switches/gateways)
+# Ports:   8443 (web UI, https), 8080 (device inform/adoption),
+#          3478/udp (STUN), 8843/8880 (guest portal), 6789 (throughput test),
+#          10001/udp (device discovery)
+#
+# Right-sized as captured from a live host: 2 cores / 3 GB RAM / 8 GB disk.
+# The 3 GB is for the bundled MongoDB + JVM — do not shrink below this.
+
+arch: amd64
+cores: 2
+memory: 3072
+swap: 512
+hostname: unifi
+ostype: debian
+unprivileged: 1
+onboot: 1
+features: nesting=1,keyctl=1
+rootfs: local-lvm:vm-<vmid>-disk-0,size=8G
+
+# Network — a static IP is recommended so adopted devices keep a stable
+# inform address. Replace with your LAN addressing (or use ip=dhcp).
+# hwaddr is auto-assigned by Proxmox on create; do not hard-code one.
+net0: name=eth0,bridge=vmbr0,ip=10.0.0.18/24,gw=10.0.0.1,ip6=dhcp,type=veth
+
+# Backup bind mount (host must have this path available, e.g. via fstab)
+mp0: /mnt/<pool>/backups/services/unifi,mp=/mnt/backups
+
+timezone: America/Adak
+tags: community-script;network;unifi
