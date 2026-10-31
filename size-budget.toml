@@ -1,0 +1,3 @@
+[size-check]
+size-pct = 70
+reason = "first real orca_tool surface — plugin went from zero orca deps (ServiceBackend stubs only) to a real HTTP client (delegated-http) plus serde/schemars/thiserror; one-time jump from an empty baseline, not incremental bloat"
