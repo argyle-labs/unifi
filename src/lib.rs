@@ -170,11 +170,28 @@ pub struct Client {
     pub access_device_id: Option<String>,
 }
 
-/// The Integration API's pagination envelope: `{ "data": [...], ... }`.
+/// The Integration API's pagination envelope: `{ "data": [...], "offset":
+/// ..., "limit": ..., "count": ..., "totalCount": ... }`. `data` is required —
+/// a response missing it is malformed, not an empty page. The numeric fields
+/// default because a controller small enough to never paginate may omit them
+/// entirely; `total_count` stays an `Option` (rather than defaulting to `0`)
+/// so callers can tell "genuinely zero total" apart from "field omitted".
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Page<T> {
-    #[serde(default = "Vec::new")]
     data: Vec<T>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    // part of the documented envelope; not needed once `count` drives paging
+    offset: u64,
+    #[serde(default)]
+    #[allow(dead_code)]
+    // part of the documented envelope; the loop paces off `count`, not the request size
+    limit: u64,
+    #[serde(default)]
+    count: u64,
+    #[serde(default)]
+    total_count: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -185,6 +202,8 @@ pub enum UnifiError {
     Api { status: u16, body: String },
     #[error("malformed unifi response: {0}")]
     Malformed(String),
+    #[error("unifi pagination exceeded {0} pages without reaching totalCount")]
+    PaginationLimitExceeded(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -252,35 +271,82 @@ async fn get_json<T: DeserializeOwned>(
     serde_json::from_str(&body).map_err(|e| UnifiError::Malformed(e.to_string()))
 }
 
-/// `GET /proxy/network/integration/v1/sites` — every configured site.
+/// Page size requested per call. The Integration API's default page is well
+/// under typical device/client counts on a populated site, so every list
+/// call must paginate rather than trust a single response to be complete.
+const PAGE_LIMIT: u64 = 200;
+
+/// Hard stop on page-fetch iterations — guards against a misbehaving or
+/// malicious controller whose `totalCount` never resolves to "done", which
+/// would otherwise loop forever. Comfortably above any real UniFi site's
+/// page count at `PAGE_LIMIT` entries per page.
+const MAX_PAGES: usize = 500;
+
+/// Fetch every page of `url` and concatenate their `data`, advancing `offset`
+/// by each page's `count` (what the server actually returned, not the
+/// requested `limit` — the two legitimately differ on the final page).
+///
+/// A response with no `totalCount` at all is treated as a single, complete,
+/// non-paginated page rather than an error — a controller/site small enough
+/// to never paginate may simply omit it, and `data` being present but
+/// incomplete-looking is not grounds to fail the whole call (this mirrors
+/// the existing "default only genuinely optional fields" pattern used for
+/// the row types above; `data` itself still has no default, so a response
+/// missing it still fails loudly).
+async fn get_all_pages<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<T>, UnifiError> {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let mut items = Vec::new();
+    let mut offset: u64 = 0;
+
+    for _ in 0..MAX_PAGES {
+        let page_url = format!("{url}{sep}offset={offset}&limit={PAGE_LIMIT}");
+        let page: Page<T> = get_json(client, &page_url).await?;
+        let count = page.count;
+        items.extend(page.data);
+
+        let total_count = match page.total_count {
+            None => return Ok(items),
+            Some(t) => t,
+        };
+        offset += count;
+        if count == 0 || offset >= total_count {
+            return Ok(items);
+        }
+    }
+
+    Err(UnifiError::PaginationLimitExceeded(MAX_PAGES))
+}
+
+/// `GET /proxy/network/integration/v1/sites` — every configured site,
+/// across all pages.
 pub async fn list_sites(client: &reqwest::Client, cfg: &Config) -> Result<Vec<Site>, UnifiError> {
     let url = cfg.api_url("sites");
-    let page: Page<Site> = get_json(client, &url).await?;
-    Ok(page.data)
+    get_all_pages(client, &url).await
 }
 
 /// `GET /proxy/network/integration/v1/sites/<site_id>/devices` — every
-/// managed device on the site.
+/// managed device on the site, across all pages.
 pub async fn list_devices(
     client: &reqwest::Client,
     cfg: &Config,
     site_id: &str,
 ) -> Result<Vec<Device>, UnifiError> {
     let url = cfg.api_url(&format!("sites/{site_id}/devices"));
-    let page: Page<Device> = get_json(client, &url).await?;
-    Ok(page.data)
+    get_all_pages(client, &url).await
 }
 
 /// `GET /proxy/network/integration/v1/sites/<site_id>/clients` — every
-/// currently connected client on the site.
+/// currently connected client on the site, across all pages.
 pub async fn list_clients(
     client: &reqwest::Client,
     cfg: &Config,
     site_id: &str,
 ) -> Result<Vec<Client>, UnifiError> {
     let url = cfg.api_url(&format!("sites/{site_id}/clients"));
-    let page: Page<Client> = get_json(client, &url).await?;
-    Ok(page.data)
+    get_all_pages(client, &url).await
 }
 
 #[cfg(test)]
@@ -307,13 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn page_envelope_defaults_empty() {
-        let empty: Page<Site> = serde_json::from_str("{}").unwrap();
-        assert!(empty.data.is_empty());
+    fn page_envelope_requires_data() {
+        let err = serde_json::from_str::<Page<Site>>("{}").unwrap_err();
+        assert!(err.to_string().contains("data"), "{err}");
     }
 
     /// Run a list fn against a mocked `http.request` capability that answers
-    /// each GET by URL suffix; any non-GET or unrouted request fails.
+    /// each GET by URL substring; any non-GET or unrouted request fails.
     fn with_mock<T>(
         routes: &[(&str, u16, &str)],
         f: impl FnOnce(
@@ -333,7 +399,7 @@ mod tests {
             assert_eq!(req.method, "GET", "read tool must only GET");
             let (_, status, body) = routes
                 .iter()
-                .find(|(suffix, _, _)| req.url.ends_with(suffix.as_str()))
+                .find(|(pat, _, _)| req.url.contains(pat.as_str()))
                 .unwrap_or_else(|| panic!("unexpected request {}", req.url));
             Ok::<String, String>(
                 serde_json::to_string(&HttpResponse {
@@ -445,5 +511,94 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, UnifiError::Api { status: 401, .. }), "{err}");
+    }
+
+    #[test]
+    fn list_sites_single_page_without_total_count_succeeds() {
+        let got = with_mock(
+            &[(
+                "/sites",
+                200,
+                r#"{"data":[{"id":"abc123","name":"Default"}]}"#,
+            )],
+            |c, cfg| Box::pin(async move { list_sites(&c, &cfg).await }),
+        )
+        .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "abc123");
+    }
+
+    /// A page omitting `totalCount` is a complete, non-paginated result, not
+    /// a request to keep paging. Also exercises `count`/`offset`/`limit`
+    /// being absent from a single-page response.
+    #[test]
+    fn list_devices_paginates_across_multiple_pages() {
+        use plugin_toolkit::abi::{HttpRequest, HttpResponse};
+        use std::sync::{Arc, Mutex};
+
+        let seen_urls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = seen_urls.clone();
+        let sink = Box::new(move |cap: &str, op: &str| {
+            assert_eq!(cap, "http.request");
+            let req: HttpRequest = serde_json::from_str(op).unwrap();
+            assert_eq!(req.method, "GET");
+            seen.lock().unwrap().push(req.url.clone());
+            let body = if req.url.contains("offset=0&limit=200") {
+                r#"{"data":[{"id":"d1","mac":"aa:aa:aa:aa:aa:01"},{"id":"d2","mac":"aa:aa:aa:aa:aa:02"}],"count":2,"totalCount":3}"#
+            } else if req.url.contains("offset=2&limit=200") {
+                r#"{"data":[{"id":"d3","mac":"aa:aa:aa:aa:aa:03"}],"count":1,"totalCount":3}"#
+            } else {
+                panic!("unexpected request {}", req.url);
+            };
+            Ok::<String, String>(
+                serde_json::to_string(&HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: body.as_bytes().to_vec(),
+                })
+                .unwrap(),
+            )
+        });
+
+        let cfg = Config::new("https://10.0.0.1:8443", "k").insecure(true);
+        let got = plugin_toolkit::capsink::with_cap_sink(sink, || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let client = cfg.build_client()?;
+            rt.block_on(list_devices(&client, &cfg, "default"))
+        })
+        .unwrap();
+
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].id, "d1");
+        assert_eq!(got[1].id, "d2");
+        assert_eq!(got[2].id, "d3");
+
+        let urls = seen_urls.lock().unwrap();
+        assert_eq!(urls.len(), 2, "{urls:?}");
+        assert!(
+            urls[1].contains("offset=2&limit=200"),
+            "second request did not advance offset: {urls:?}"
+        );
+    }
+
+    /// A controller whose `totalCount` never resolves to "done" must not
+    /// loop forever or silently return a truncated list — it must error.
+    #[test]
+    fn list_sites_errors_when_pagination_never_terminates() {
+        let err = with_mock(
+            &[(
+                "/sites",
+                200,
+                r#"{"data":[{"id":"abc"}],"count":1,"totalCount":999999999}"#,
+            )],
+            |c, cfg| Box::pin(async move { list_sites(&c, &cfg).await }),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, UnifiError::PaginationLimitExceeded(_)),
+            "{err}"
+        );
     }
 }
