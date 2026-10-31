@@ -16,14 +16,20 @@ crate-type = ["rlib"]
 name = "unifi"
 path = "src/main.rs"
 
-# unifi is a BACKEND-ONLY orca plugin: zero #[orca_tool]s. It registers a
-# ServiceBackend over the orca socket and reaches the whole orca system
-# through plugin-toolkit alone.
+# unifi is a DUAL-facet orca plugin: a ServiceBackend plus a read-only
+# `unifi.` #[orca_tool] surface over the Integration API. Both facets resolve
+# through `plugin_toolkit::*` alone.
+#
+# Thin profile: `delegated-http` retargets the HTTP client onto orca's
+# `http.request` capability, so this plugin links NO reqwest/rustls/hyper.
 [dependencies]
-plugin-toolkit = { version = ">=0.2.1-rc.47", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db"] }
+plugin-toolkit = { version = ">=0.2.1-rc.47", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "delegated-http"] }
+serde     = { version = "1", features = ["derive"] }
+schemars  = { version = "1", features = ["derive"] }
+thiserror = "2"
 
 [dev-dependencies]
-plugin-toolkit = { version = ">=0.2.1-rc.47", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db"] }
+plugin-toolkit = { version = ">=0.2.1-rc.47", registry = "gitea", package = "orca-plugin-toolkit", default-features = false, features = ["tools", "db", "delegated-http"] }
 tokio    = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 
